@@ -200,7 +200,9 @@ class Caffe2Frontend(object):
                                for init in initializer})
         else:
             initializer = []
-
+	print("begin initial")
+		
+	
         # Check whether we have got type shape info of all input
         missing = (set(list(predict_net.external_input)) -
                    set(value_info.keys()))
@@ -210,10 +212,11 @@ class Caffe2Frontend(object):
 
         inputs = {}
         for name in predict_net.external_input:
+	    print name
             elem_type, shape = value_info[name]
             inputs[name] = np.random.randn(*shape).astype(
                 mapping.TENSOR_TYPE_TO_NP_TYPE[elem_type])
-
+	print("end initial")
         ws, outputs = c2_native_run_net(
             init_net,
             predict_net,
@@ -272,6 +275,7 @@ class Caffe2Frontend(object):
         output_names = []
         for op in init_net.op:
             output_names.extend(op.output)
+	print(": ".join(map(str,output_names)))
         initializer = [numpy_helper.from_array(ws.FetchBlob(name), name=name)
                        for name in sorted(set(output_names))]
         return initializer
