@@ -30,24 +30,20 @@ std::unique_ptr<RecurrentNetworkExecutorBase> createRNNExecutor<CPUContext>(
 /**
  * Run forwardpass with T timesteps.
  */
-bool ThreadedRecurrentNetworkExecutor::Run(int T) {
-  VLOG(2) << "QW: begin step 5.0 rnn op";	
+bool ThreadedRecurrentNetworkExecutor::Run(int T) {	
   CAFFE_ENFORCE(timestep_ops_.size() >= T);
   countdown_ = T * timestep_ops_[0].size();
   finished_timesteps_ = 0;
 
   CHECK(task_queue_.size() == 0);
 
-  for (auto& rnn_op : timestep_ops_[0]) {
-    VLOG(2) << "QW: begin step 5.1 rnn op" << rnn_op.order;	
+  for (auto& rnn_op : timestep_ops_[0]) {	
     // Launch "frontier"-ops first.
     if (rnn_op.frontier) {
       task_queue_.Push(OpTask(0, rnn_op.order, T, 1));
     }
-  }
-  VLOG(2) << "QW: begin step 5.2 wait for finish";	
+  }	
   _Exec();
-  VLOG(2) << "QW: begin step 5.3";
   return true;
 }
 
@@ -101,10 +97,8 @@ void ThreadedRecurrentNetworkExecutor::RunOp(OpTask job, int /*thread_id*/) {
 
   // Reset input dependency counter
   rnn_op.proc_inputs = 0;
-  VLOG(2) << "QW: begin step 5.2.1 runop" << rnn_op.op->type();
   // Run the operator
   rnn_op.op->Run();
-  VLOG(2) << "QW: finish step 5.2.1 runop"<< rnn_op.op->type();
   // Knock down dependencies and start next ops, if this
   // was last dependency fulfilled.
   for (int depidx : rnn_op.dependencies) {

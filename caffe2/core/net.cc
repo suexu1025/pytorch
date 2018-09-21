@@ -56,7 +56,6 @@ NetBase::NetBase(
   }
   for (const OperatorDef& op : def->op()) {
     for (const string& in : op.input()) {
-      VLOG(1) << "QW: op " << op.type() << ": input " << in;
       if (!known_blobs.count(in)) {
         if (external_input_.size()) {
           CAFFE_THROW(

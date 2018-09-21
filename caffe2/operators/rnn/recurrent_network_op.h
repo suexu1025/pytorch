@@ -82,11 +82,6 @@ void applyOffsetAlias(
       numDstTimesteps >= 1, "Invalid number of timesteps: ", numDstTimesteps);
   dims[0] = numDstTimesteps;
   dst->Resize(dims);
-  VLOG(1) << "QW:check for blob" << oc.dst;
-  for (int i = 0; i < dims.size(); i++)
-  {
-       VLOG(1) << "QW: this blob size is" << oc.dst;
-  }
   CAFFE_ENFORCE(timestep == dst->size() / numDstTimesteps, "Invalid offset");
   dst->ShareExternalPointer(
       src->template mutable_data<T>() + startDstTimestep * timestep,
@@ -120,17 +115,12 @@ void initializeRecurrentInput(
   CAFFE_ENFORCE(stateBlob);
   auto* state = stateBlob->GetMutableTensor(Context::GetDeviceType());
 
-  VLOG(1) << "QW:check for blob name" << rc.input;
   auto inputBlob = ws->GetBlob(rc.input);
   CAFFE_ENFORCE(inputBlob);
   const auto& input = inputBlob->template Get<Tensor>();
   CAFFE_ENFORCE_GE(input.ndim(), 1, rc.input);
   CAFFE_ENFORCE_LE(input.ndim(), 3, rc.input);
 
-  for (int i = 0; i < input.ndim(); i++)
-  {
-   VLOG(1) << "QW: init_h dim" << input.dim(i);
-  }
   const auto stateSize = input.dim(input.ndim() - 1);
   // Sometimes we want to provide more than one initial step.
   // For example, if we do a convolution op in step net
@@ -142,11 +132,6 @@ void initializeRecurrentInput(
   }
   // States at [0, ..., (T + initialStateLength - 1)] (inclusive)
   state->Resize(seqLen + initialStateLength, batchSize, stateSize);
-
-  VLOG(1) << "QW:check for resize" << initialStateLength << ","
-	  << seqLen << ","
-	  << batchSize << ","
-	  << stateSize;
 
   if (input.ndim() >= 2) {
     CAFFE_ENFORCE_EQ(input.dim(input.ndim() - 2), batchSize, rc.input);
@@ -227,7 +212,6 @@ class RecurrentNetworkOp final : public Operator<Context> {
       }
       CAFFE_ENFORCE(stepNetDef_.type() != "async_dag");
     }
-    VLOG(1) << "QW: finish initial rnn op";
   }
 
   size_t NumObservers() override {
@@ -314,7 +298,6 @@ class RecurrentNetworkOp final : public Operator<Context> {
   bool DoRunWithType() {
     const auto seqLen = Input(0).dim32(0);
     const auto batchSize = Input(0).dim32(1);
-    VLOG(1) << "QW: begin running rnn op";
     for (const auto& ri : recurrentInputs_) {
       detail::initializeRecurrentInput<T, Context>(
           ri, seqLen, batchSize, sharedWs_, &context_);
@@ -327,7 +310,6 @@ class RecurrentNetworkOp final : public Operator<Context> {
         (this->template HasSingleArgumentOfType<string>("backward_step_net") &&
          this->template GetSingleArgument<string>("backward_step_net", "") !=
              "");
-    VLOG(1) << "QW: begin step 1 rnn op";
     // With backward pass: we need to create workspace for each timestep
     detail::ScratchWorkspaces* scratch =
         OperatorBase::Output<detail::ScratchWorkspaces>(OutputSize() - 1);
@@ -346,7 +328,6 @@ class RecurrentNetworkOp final : public Operator<Context> {
     if (has_backward_pass && seqLen > stepWorkspaces.size()) {
       stepWorkspaces.resize(seqLen);
     }
-    VLOG(1) << "QW: begin step 2 rnn op";
     // In forward-only mode, we cycle over workspaces. This limits the amount
     // of parallelism over timesteps that the RNNExecutor provides. So with
     // RNN executor we use more workspaces to get better perf.
@@ -358,7 +339,6 @@ class RecurrentNetworkOp final : public Operator<Context> {
       // we cannot shrink it to 2 if there are more than 2 step workspaces.
       stepWorkspaces.resize(num_workspaces_on_fwd_only);
     }
-   VLOG(1) << "QW: begin step 3 rnn op";
     for (auto t = 0; t < seqLen; ++t) {
       auto& currentStepWorkspace =
           (has_backward_pass ? stepWorkspaces[t] :
@@ -366,17 +346,13 @@ class RecurrentNetworkOp final : public Operator<Context> {
       if (!currentStepWorkspace) {
         currentStepWorkspace = std::make_shared<Workspace>(sharedBlobsWs.get());
       }
-      VLOG(2) << "QW: begin step 3.1 rnn op";
       if (rnnExecutor_) {
-        VLOG(2) << "QW: begin step 3.1.1 rnn op";
         if (!has_backward_pass) {
           // Need to limit timestep parallelism because we cycle over workspaces
           rnnExecutor_->SetMaxParallelTimesteps(num_workspaces_on_fwd_only);
         }
-	VLOG(2) << "QW: begin step 3.1.2 rnn op";
         rnnExecutor_->EnsureTimestepInitialized(
             t, currentStepWorkspace.get(), this->observers_list_);
-	VLOG(2) << "QW: begin step 3.1.3 rnn op";
       } else {
         // Use plain Caffe2 nets
         detail::UpdateTimestepBlob(currentStepWorkspace.get(), timestep_, t);
@@ -389,12 +365,9 @@ class RecurrentNetworkOp final : public Operator<Context> {
         stepNet->RunAsync();
       }
     }
-    VLOG(1) << "QW: begin step 4 rnn op";
     if (rnnExecutor_) {
       rnnExecutor_->Run(seqLen);
     }
-
-    VLOG(1) << "QW: finish running rnn op";
 
     for (const auto& alias : aliases_) {
       detail::applyOffsetAlias<T, Context>(alias, sharedWs_, &context_);
