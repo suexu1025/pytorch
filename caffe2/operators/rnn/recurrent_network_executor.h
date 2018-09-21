@@ -70,7 +70,7 @@ class RecurrentNetworkExecutorBase {
     if (timestep_ops_template_.size() == 0) {
       // Firsrt invocation -- compute dependencies
       CalculateInternalDependencies();
-
+      
       // Label ops based on whether they contain reference to the timestep
       // blob. This is an optimization to avoid string comparisons later.
       for (auto& rnn_op : timestep_ops_template_) {
@@ -89,7 +89,6 @@ class RecurrentNetworkExecutorBase {
             " op=" + ProtoDebugString(op));
       }
     }
-
     // Initialize timestep if it is not initialized
     if (timestep_ops_.size() <= t ||
         (timestep_ops_.size() > t && timestep_ops_[t].size() == 0)) {
@@ -115,7 +114,6 @@ class RecurrentNetworkExecutorBase {
       auto b = ws->GetBlob(this_timestep_blob);
       CAFFE_ENFORCE(b);
       b->GetMutableTensor(CPU)->template mutable_data<int32_t>()[0] = t;
-
       // Copy the operators from template
       for (auto& template_rnn_op : timestep_ops_template_) {
         auto& rnn_op = template_rnn_op;
@@ -132,7 +130,7 @@ class RecurrentNetworkExecutorBase {
               op_copy.set_input(i, this_timestep_blob);
             }
           }
-
+	  
           rnn_op.op = CreateOperator(op_copy, ws);
           for (const auto& observer : observers_list) {
             std::unique_ptr<ObserverBase<OperatorBase>> rnn_observer_copy =

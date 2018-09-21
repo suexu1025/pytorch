@@ -21,13 +21,14 @@ from caffe2.proto import caffe2_legacy_pb2
 from enum import Enum
 from onnx import (defs, checker, helper, numpy_helper, mapping,
                   ModelProto, GraphProto, NodeProto, AttributeProto, TensorProto, OperatorSetIdProto)
-from onnx.helper import make_tensor, make_tensor_value_info, make_attribute, make_model
+from onnx.helper import make_node, make_tensor, make_tensor_value_info, make_attribute, make_model
 import numpy as np
 
 from caffe2.python.onnx.helper import c2_native_run_net
 from caffe2.python.onnx.error import Unsupported
 
 import caffe2.python._import_c_extension as C
+from caffe2.python import model_helper, workspace
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -72,8 +73,17 @@ class Caffe2Frontend(object):
         'Transpose': {'axes': 'perm'},
     }
 
-    _special_operators = {}
+    _special_operators = {
+	'RecurrentNetwork':'_create_rnn_variant',
+	'MergeDim':'_create_mergedim_variant',
+    }
 
+    _skipped_operators = {
+	'FC':'None',
+    }
+
+    _renamed_inputs = {}
+    _initialize= {}
     # Dummy name generator
     _dummy_name = C.DummyName()
 
@@ -104,6 +114,8 @@ class Caffe2Frontend(object):
             value = arg.ints
         elif arg.strings:
             value = arg.strings
+        elif arg.n:
+            return None
         else:
             raise ValueError('Could not find data field in arg: {}'.format(arg))
 
@@ -134,6 +146,102 @@ class Caffe2Frontend(object):
         return node_def
 
     @classmethod
+    def _create_rnn_variant(cls, op_def, shapes):
+        node_def = make_node('LSTM', inputs = op_def.input, outputs = [op_def.output[0]], direction = 'bidirectional', )
+        node_def.name = op_def.name
+
+        return node_def
+
+    @classmethod
+    def _create_rnn_node(cls, ws, op, inputs):
+        merged_B = op[0].input[0]+'_LSTM_B'
+        merged_W = op[0].input[0]+'_LSTM_W'
+        merged_R = op[0].input[0]+'_LSTM_R'
+
+        fw_i2h_b = filter(lambda x: "fw/i2h_b" in x , inputs)
+        bw_i2h_b = filter(lambda x: "bw/i2h_b" in x , inputs)
+
+        fw_gates_t_b = filter(lambda x: "fw/gates_t_b" in x , inputs)
+        bw_gates_t_b = filter(lambda x: "bw/gates_t_b" in x , inputs)
+        
+        fw_i2h_w = filter(lambda x:"fw/i2h_w" in x , inputs)
+        bw_i2h_w = filter(lambda x:"bw/i2h_w" in x , inputs)        
+        
+        fw_gates_t_w = filter(lambda x:"fw/gates_t_w" in x , inputs)
+        bw_gates_t_w = filter(lambda x:"bw/gates_t_w" in x , inputs) 
+
+        shape = ws.FetchBlob(fw_i2h_b[0]).shape
+
+        gates =  ['input', 'output', 'forget', 'cell']
+        hidden_size = 128
+    
+        allnames = ((fw_i2h_b[0], []),
+                     (bw_i2h_b[0], []),
+                     (fw_gates_t_b[0], []),
+                     (bw_gates_t_b[0], []),
+                     (fw_i2h_w[0], [(0,-1)]),
+                     (bw_i2h_w[0], [(0,-1)]),
+                     (fw_gates_t_w[0], [(0,-1)]),
+                     (bw_gates_t_w[0],[(0,-1)]))
+
+        reorder_indices = [0, 2, 1, 3]
+        for name, extra_dims in allnames:
+            gate_blobs = ['%s/%s' % (name, prefix) for prefix in gates]
+
+            for i, x in enumerate(gate_blobs):
+                dim0 = i * hidden_size, (i+1) * hidden_size
+                starts, ends = zip(dim0, *extra_dims)
+                sliceop = caffe2_core.CreateOperator("Slice", [name], [x], starts=starts, ends=ends)
+                ws.RunOperatorOnce(sliceop)
+            reordered_gate_blobs = [gate_blobs[i] for i in reorder_indices]
+            mergeop = caffe2_core.CreateOperator("Concat", reordered_gate_blobs, [ name, name + 'tmp'], axis=0)
+            ws.RunOperatorOnce(mergeop)
+
+
+        merge_op = caffe2_core.CreateOperator("Concat", [fw_i2h_b[0], fw_gates_t_b[0], bw_i2h_b[0], bw_gates_t_b[0]], [ merged_B,  op[0].input[0]+'_tmp'], axis = 0)
+        ws.RunOperatorOnce(merge_op)
+
+        merge_op = caffe2_core.CreateOperator("Concat", [fw_i2h_w[0], bw_i2h_w[0]], [ merged_W, op[0].input[0]+'_tmp'], axis = 0)
+        ws.RunOperatorOnce(merge_op)
+
+        merge_op = caffe2_core.CreateOperator("Concat", [fw_gates_t_w[0], bw_gates_t_w[0]], [ merged_R,  op[0].input[0]+'_tmp'], axis = 0)
+        ws.RunOperatorOnce(merge_op)
+        
+        expenddim = caffe2_core.CreateOperator("ExpandDims", merged_W, merged_W, dims = [0])
+        ws.RunOperatorOnce(expenddim)
+        
+        expenddim = caffe2_core.CreateOperator("ExpandDims", merged_R, merged_R, dims = [0])
+        ws.RunOperatorOnce(expenddim)
+
+        removelist = []
+        removelist.append(fw_i2h_b[0])
+        removelist.append(bw_i2h_b[0])
+        removelist.append(fw_gates_t_b[0])
+        removelist.append(bw_gates_t_b[0])
+        removelist.append(fw_i2h_w[0])
+        removelist.append(bw_i2h_w[0])
+        removelist.append(fw_gates_t_w[0])
+        removelist.append(bw_gates_t_w[0])
+    
+
+        addlist = []
+
+        addlist.append(merged_B)
+        addlist.append(merged_R)
+        addlist.append(merged_W)
+                    
+        node_def = make_node('LSTM', inputs =[ op[0].input[0],  merged_W, merged_R, merged_B, op[1].input[5], op[1].input[1] , op[1].input[2] ],
+        outputs = [op[6].output[0]], direction = 'bidirectional', hidden_size=128)
+
+        return [node_def], removelist, addlist
+
+    @classmethod
+    def _create_mergedim_variant(cls, op_def, shapes):
+        node_def = make_node('Flatten', inputs = op_def.input, outputs = op_def.output, axis = 4)
+        node_def.name = op_def.name
+        return node_def
+
+    @classmethod
     def caffe2_op_to_onnx_node(cls, op_def, shapes):
         if C.support_onnx_export(op_def.type):
             node_strs, tensor_strs = C.export_to_onnx(cls._dummy_name, op_def.SerializeToString(), shapes)
@@ -152,6 +260,7 @@ class Caffe2Frontend(object):
             translator = getattr(cls, cls._special_operators[op_def.type])
         else:
             translator = cls._common_caffe2_op_to_onnx_node
+	    
         nodes = translator(op_def, shapes)
         const_tensors = []
         if isinstance(nodes, tuple):
@@ -193,14 +302,14 @@ class Caffe2Frontend(object):
 
         cls._filter_fake_init(init_net, value_info)
         cls._ssa_rewrite(predict_net, init_net, value_info)
-
+        not_to_generate = []
         if init_net:
             initializer = cls.caffe2_init_net_to_initializer(init_net)
             value_info.update({init.name: (init.data_type, init.dims)
                                for init in initializer})
+            not_to_generate = [init.name for init in initializer]
         else:
             initializer = []
-	print("begin initial")
 		
 	
         # Check whether we have got type shape info of all input
@@ -212,16 +321,16 @@ class Caffe2Frontend(object):
 
         inputs = {}
         for name in predict_net.external_input:
-	    print name
             elem_type, shape = value_info[name]
-            inputs[name] = np.random.randn(*shape).astype(
-                mapping.TENSOR_TYPE_TO_NP_TYPE[elem_type])
-	print("end initial")
+            if name not in not_to_generate:
+                inputs[name] = np.random.randn(*shape).astype(
+                    mapping.TENSOR_TYPE_TO_NP_TYPE[elem_type])
+        
         ws, outputs = c2_native_run_net(
             init_net,
             predict_net,
             inputs)
-
+        
         for name in predict_net.external_output:
             output = outputs[name]
             elem_type = mapping.NP_TYPE_TO_TENSOR_TYPE[output.dtype]
@@ -230,27 +339,68 @@ class Caffe2Frontend(object):
 
         graph_def = GraphProto()
         graph_def.name = predict_net.name
+
+        cls._dummy_name.reset(cls._all_names_in_net(predict_net) | cls._all_names_in_net(init_net))
+        rolling = False
+        rolling_ops = []
+        rolling_inputs = []
+        addList = []
+        removeList=[]
+        for op in predict_net.op:
+            shapes = {}
+            if op.type in cls._skipped_operators and any("i2h_w" in s for s in op.input):
+                rolling = True
+            if rolling:
+                rolling_ops.append(op)
+                for name in op.input:
+                    rolling_inputs.append(name)
+            
+                if len(rolling_ops) == 7:
+                    nodes, to_remove, to_add = cls._create_rnn_node(ws, rolling_ops, rolling_inputs)
+                    rolling_ops = []
+                    rolling_inputs = []
+                    rolling = False
+                    graph_def.node.extend(nodes)
+                    removeList.extend(to_remove)
+                    addList.extend(to_add)
+                    continue
+            else:
+                for name in itertools.chain(op.input, op.output):
+                    blob = ws.FetchBlob(name)
+                    if hasattr(blob, 'shape'):
+                        shapes[name] = blob.shape
+                
+                #print (shapes)
+                nodes, const_tensors = cls.caffe2_op_to_onnx_node(op, shapes=shapes)
+                
+                #print (nodes)
+                graph_def.node.extend(nodes)
+                graph_def.initializer.extend(const_tensors)
+                graph_def.input.extend([cls._extract_value_info(tensor) for tensor in const_tensors])
+       
+        initializer = [init for init in initializer if init.name not in removeList]
+
         graph_def.initializer.extend(initializer)
+
+        graph_def.initializer.extend ([numpy_helper.from_array(ws.FetchBlob(name), name=name)
+                    for name in sorted(set(addList))]) 
+
         # This is a mapping from Caffe2 names to ONNX names
         graph_def.input.extend(
             make_tensor_value_info(
                 name=name,
                 elem_type=value_info[name][0],
                 shape=value_info[name][1])
-            for name in predict_net.external_input)
-
-        cls._dummy_name.reset(cls._all_names_in_net(predict_net) | cls._all_names_in_net(init_net))
-
-        for op in predict_net.op:
-            shapes = {}
-            for name in itertools.chain(op.input, op.output):
-                blob = ws.FetchBlob(name)
-                if hasattr(blob, 'shape'):
-                    shapes[name] = blob.shape
-            nodes, const_tensors = cls.caffe2_op_to_onnx_node(op, shapes=shapes)
-            graph_def.node.extend(nodes)
-            graph_def.initializer.extend(const_tensors)
-            graph_def.input.extend([cls._extract_value_info(tensor) for tensor in const_tensors])
+            for name in predict_net.external_input if name not in removeList)
+  
+        graph_def.input.extend(
+            make_tensor_value_info(
+                name=init.name,
+                elem_type=init.data_type,
+                shape=init.dims)
+            for init in graph_def.initializer if init.name in addList)
+      
+        
 
         all_output = set(sum((list(node.output) for node in graph_def.node),
                              [init.name for init in graph_def.initializer]))
@@ -275,7 +425,7 @@ class Caffe2Frontend(object):
         output_names = []
         for op in init_net.op:
             output_names.extend(op.output)
-	print(": ".join(map(str,output_names)))
+
         initializer = [numpy_helper.from_array(ws.FetchBlob(name), name=name)
                        for name in sorted(set(output_names))]
         return initializer
@@ -305,6 +455,7 @@ class Caffe2Frontend(object):
                 assert re.match('GivenTensor.*Fill', op.type), "type is {}, \n{}".format(op.type, op)
                 assert len(op.output) == 1
                 op.output[0] = ssa_name(op.output[0], 0)
+		
             init_net.external_input[:] = [ssa_name(name, 0)
                                           for name in init_net.external_input]
             init_net.external_output[:] = [ssa_name(name, 0)
@@ -319,13 +470,27 @@ class Caffe2Frontend(object):
         ssa, blob_versions = caffe2_core.get_ssa(net)
         assert len(net.op) == len(ssa)
         for op, (versioned_inputs, versioned_outputs) in zip(net.op, ssa):
-            op.input[:] = [ssa_name(name, version)
+            
+	    for name, verson in versioned_inputs:
+	    	for arg in op.arg:
+			if arg.strings:
+		    		arg.strings[:] = [w.replace(name, ssa_name(name, verson)).encode("utf8") for w in arg.strings]
+			for nop in arg.n.op:
+				nop.input[:] = [w.replace(name, ssa_name(name, verson)).encode("utf8") for w in nop.input]
+			if [w.replace(name, ssa_name(name, verson)).encode("utf8") for w in arg.n.external_input]:
+				arg.n.external_input[:] = [w.replace(name, ssa_name(name, verson)).encode("utf8") for w in arg.n.external_input]
+
+	    for name, verson in versioned_outputs:
+	    	for arg in op.arg:
+	    		arg.strings[:] = [w.replace(name, ssa_name(name, verson)).encode("utf8") for w in arg.strings]
+
+			
+	    op.input[:] = [ssa_name(name, version)
                            for name, version in versioned_inputs]
             op.output[:] = [ssa_name(name, version)
                             for name, version in versioned_outputs]
         net.external_output[:] = [ssa_name(name, blob_versions[name])
                                   for name in net.external_output]
-
     @classmethod
     def caffe2_net_to_onnx_model(cls, *args, **kwargs):
         opset_id = OperatorSetIdProto()
