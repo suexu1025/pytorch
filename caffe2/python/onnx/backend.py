@@ -196,7 +196,6 @@ class Caffe2Backend(Backend):
         'Loop': '_create_loop',
         'If': '_create_if',
         'Upsample': '_create_upsample',
-        'Flatten': '_create_merge_dim',
     }
 
     # Dummy name generator

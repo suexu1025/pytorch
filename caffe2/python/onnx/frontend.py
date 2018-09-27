@@ -237,9 +237,30 @@ class Caffe2Frontend(object):
 
     @classmethod
     def _create_mergedim_variant(cls, op_def, shapes):
-        node_def = make_node('Flatten', inputs = op_def.input, outputs = op_def.output, axis = 4)
-        node_def.name = op_def.name
-        return node_def
+	dim = len(shapes[op_def.input[0]])
+	values = np.zeros(dim, dtype=int)
+	values[0] = 1
+	values[1] = -1
+	for i in range(2,dim):
+	    values[i] = 0
+
+	shape_name = "MergeDimShape"
+	temp_name= "MergeDim_TMP"
+	node_def1 = make_node('Constant', inputs = [], 
+	outputs = [shape_name],
+	value=make_tensor(
+		name='const_tensor',
+		data_type=TensorProto.INT32,
+		dims=values.shape,
+		vals=values.flatten().astype(np.int32),),
+	)
+        inputs_all = op_def.input
+	inputs_all.append(shape_name)
+	
+	node_def2 = make_node('Reshape', inputs = inputs_all, outputs = [temp_name])        
+	node_def3 = make_node('Squeeze', inputs = [temp_name], outputs = op_def.output, axes=[0],)
+	node_def3.name = op_def.name       
+	return [node_def1, node_def2, node_def3]
 
     @classmethod
     def caffe2_op_to_onnx_node(cls, op_def, shapes):
